@@ -1,0 +1,29 @@
+# ---- 运行时产物 ----
+# SQLite 数据库（含 Key 哈希、审计日志、用量记录）——绝不提交
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+
+# 日志
+*.log
+
+# ---- macOS ----
+.DS_Store
+._*
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ---- 私有运维记录（不进公开仓库）----
+# 这份文档含本机域名、Cloudflare 账号 ID、隧道 ID、zone ID 和本机绝对路径。
+# 留在本地作运维参考，但不提交——公开仓库里不需要这些。
+# 想强制纳入版本管理：git add -f "docs/Tunnel-上线记录与运维.md"
+docs/Tunnel-上线记录与运维.md
