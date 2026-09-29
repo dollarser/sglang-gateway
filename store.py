@@ -56,12 +56,15 @@ def parse_expires(spec: Optional[str]) -> Optional[str]:
     return dt.strftime(TS_FMT)
 
 
+_DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "gateway.db")
+
+
 class Store:
-    def __init__(self, path: str = "gateway.db"):
-        self.path = path
+    def __init__(self, path: Optional[str] = None):
+        self.path = path or os.getenv("GATEWAY_DB", _DEFAULT_DB)
         self._lock = threading.Lock()
         self._event_count = 0
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
