@@ -86,23 +86,21 @@ pip install -r requirements.txt
 python cli.py create --name alice --rpm 60 --daily-tokens 2000000 --expires 90d
 # 输出里的「密钥」只显示这一次，立刻保存
 
-# 2. 启动网关（只监听本地，由 Cloudflare Tunnel 对外）
-./run.sh
+# 2. 启动网关（默认脱离终端在后台运行，关闭终端或 SSH 不受影响）
+./run.sh              # 启动网关（后台运行）
+./run.sh status       # 查看网关运行状态与 PID
+./run.sh logs         # 查看实时运行日志
+./run.sh restart      # 重启网关
+./run.sh stop         # 停止网关
+./run.sh fg           # 前台运行（本地调试排查问题用）
 ```
 
-`run.sh` 把端口、后端地址、并发上限这些参数都固化在文件头部，改完直接跑，不用每次敲一长串命令。当前默认：
+`run.sh` 默认采用 `setsid` 机制完全脱离当前终端与 Shell 会话，进程的父进程自动托管给 PID 1，SSH 断开或退出终端后持续稳定运行。当前默认：
 
 ```
 SGLang 后端   http://127.0.0.1:30007
 监听          http://127.0.0.1:2233
 数据库        data/gateway.db
-```
-
-也可以临时覆盖：`PORT=3000 ./run.sh`。不想用脚本就手动起：
-
-```bash
-export SGLANG_BASE_URL=http://127.0.0.1:30007
-uvicorn app:app --host 127.0.0.1 --port 2233
 ```
 
 兼容层的单元测试（纯标准库，不需要 SGLang）：
