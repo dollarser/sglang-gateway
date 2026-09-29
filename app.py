@@ -251,7 +251,17 @@ async def lifespan(app: FastAPI):
             lock.close()
 
 
-app = FastAPI(title="SGLang API Gateway", docs_url=None, redoc_url=None, lifespan=lifespan)
+# 三个自动生成的文档端点全部关掉。
+# docs_url / redoc_url 默认给 /docs 和 /redoc，openapi_url 默认给 /openapi.json。
+# /openapi.json 无需鉴权就能拿到完整路由表，连 proxy() 的 docstring 都会一起吐出去，
+# 等于把内部实现思路交给扫描者 —— 而且它不经过 /v1/{path}，白名单管不到。
+app = FastAPI(
+    title="SGLang API Gateway",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
