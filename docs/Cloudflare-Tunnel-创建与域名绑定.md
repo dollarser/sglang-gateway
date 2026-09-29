@@ -164,7 +164,7 @@ Added CNAME llm.example.com which will route to this tunnel
 
 | Type | Name | Content |
 |---|---|---|
-| CNAME | llm | `9c653d28-....cfargotunnel.com` |
+| CNAME | llm | `a1b2c3d4-....cfargotunnel.com` |
 
 看到 `cfargotunnel.com` 结尾就对了。
 
