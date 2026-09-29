@@ -213,11 +213,15 @@ def cmd_audit(store: Store, args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    default_db = os.getenv(
+        "GATEWAY_DB",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "gateway.db"),
+    )
     parser = argparse.ArgumentParser(description="SGLang 网关 API Key 管理工具")
     parser.add_argument(
         "--db",
-        default=os.getenv("GATEWAY_DB", "gateway.db"),
-        help="SQLite 数据库路径（默认读环境变量 GATEWAY_DB）",
+        default=default_db,
+        help="SQLite 数据库路径（默认使用项目内 data/gateway.db，或读环境变量 GATEWAY_DB）",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

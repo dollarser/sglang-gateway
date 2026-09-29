@@ -95,7 +95,7 @@ python cli.py create --name alice --rpm 60 --daily-tokens 2000000 --expires 90d
 ```
 SGLang 后端   http://127.0.0.1:30007
 监听          http://127.0.0.1:2233
-数据库        ~/gateway-data/gateway.db
+数据库        data/gateway.db
 ```
 
 也可以临时覆盖：`PORT=3000 ./run.sh`。不想用脚本就手动起：
@@ -117,7 +117,7 @@ python3 -m unittest discover -p "test_*.py"   # 40 项，不需要 SGLang
 |---|---|---|
 | `SGLANG_BASE_URL` | `http://127.0.0.1:30007` | SGLang 服务地址。**填裸 SGLang，不要填兼容代理的端口**——兼容改写已内化 |
 | `SGLANG_API_KEY` | 空 | 若 SGLang 启动了 `--api-key`，在此填写，网关会自动附加 |
-| `GATEWAY_DB` | `gateway.db` | SQLite 数据库路径。**生产环境务必用绝对路径** |
+| `GATEWAY_DB` | `data/gateway.db` | SQLite 数据库路径。默认在项目内 `data/gateway.db`，完全自包含 |
 | `MAX_BODY_BYTES` | `62914560` | 请求体上限，默认 60MB（严格低于 64MB，容纳多模态图片/短视频输入） |
 | `ALLOWED_PATHS` | `chat/completions,completions,embeddings,models,rerank,score` | **转发白名单**，防路径穿越，见下方安全说明 |
 | `MAX_OUTPUT_TOKENS` | `0` | 单次输出上限。**`0` = 不限制**（推荐），由模型上下文窗口与剩余配额约束 |
@@ -141,7 +141,7 @@ python3 -m unittest discover -p "test_*.py"   # 40 项，不需要 SGLang
 | 参数 | 默认 | 改成 | 原因 |
 |---|---|---|---|
 | `SGLANG_BASE_URL` | `127.0.0.1:30000` | `127.0.0.1:30007` | 你的服务不在默认端口，不改会全部 502。**填裸 SGLang 的端口** |
-| `GATEWAY_DB` | `gateway.db` | 绝对路径，如 `~/gateway-data/gateway.db` | 相对路径依赖工作目录，systemd 启动时目录不同就找不到库，会**静默新建一个空库**——表现为所有 Key 突然失效 |
+| `GATEWAY_DB` | `data/gateway.db` | 保持默认（项目内 `data/gateway.db`） | 默认已指向项目目录内，完全自包含 |
 
 #### 建议调的
 

@@ -4,6 +4,13 @@
 *.db-wal
 *.db-shm
 *.db.lock
+data/
+
+# 隧道敏感凭据与配置文件（包含私钥和证书）——绝不提交
+tunnel/*.json
+tunnel/*.pem
+tunnel/config.yml
+tunnel/*.log
 
 # 日志
 *.log

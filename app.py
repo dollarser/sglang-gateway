@@ -65,8 +65,8 @@ if not logging.getLogger().handlers:
 # ---------------- 配置 ----------------
 
 SGLANG_BASE_URL = os.getenv("SGLANG_BASE_URL", "http://127.0.0.1:30007").rstrip("/")
-SGLANG_API_KEY = os.getenv("SGLANG_API_KEY", "")
-GATEWAY_DB = os.getenv("GATEWAY_DB", "gateway.db")
+_DEFAULT_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "gateway.db")
+GATEWAY_DB = os.getenv("GATEWAY_DB", _DEFAULT_DB)
 # 请求体上限：默认 60MB（严格低于 64MB，兼顾多模态高清图/短视频与网络稳定性）
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(60 * 1024 * 1024)))
 INJECT_STREAM_USAGE = os.getenv("INJECT_STREAM_USAGE", "1") not in ("0", "false", "no")

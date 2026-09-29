@@ -14,7 +14,8 @@ set -euo pipefail
 # 日志里有客户端 IP，都不该给同机其他用户看。
 umask 077
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # ---------------- 配置区：按你的实际情况改这里 ----------------
 
@@ -25,8 +26,8 @@ export SGLANG_BASE_URL="${SGLANG_BASE_URL:-http://127.0.0.1:30007}"
 # SGLang 若启用了 --api-key，在这里填；没启用就留空
 export SGLANG_API_KEY="${SGLANG_API_KEY:-}"
 
-# 数据库绝对路径。不要用相对路径——服务的工作目录一变就找不到库了
-export GATEWAY_DB="${GATEWAY_DB:-$HOME/gateway-data/gateway.db}"
+# 数据库绝对路径。默认放在项目内的 data/ 目录下，完全自包含、不依赖外部目录
+export GATEWAY_DB="${GATEWAY_DB:-$SCRIPT_DIR/data/gateway.db}"
 
 # 全局在途请求上限。按 SGLang 承载能力设（后端 --max-running-requests 为 4 时设为 4，防止并发压垮显存）
 export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-4}"
