@@ -67,7 +67,8 @@ if not logging.getLogger().handlers:
 SGLANG_BASE_URL = os.getenv("SGLANG_BASE_URL", "http://127.0.0.1:30007").rstrip("/")
 SGLANG_API_KEY = os.getenv("SGLANG_API_KEY", "")
 GATEWAY_DB = os.getenv("GATEWAY_DB", "gateway.db")
-MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(10 * 1024 * 1024)))
+# 请求体上限：默认放宽至 100MB（对齐 Cloudflare 免费版上限，从容支持多模态高清图/视频与超长 Agent 上下文）
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(100 * 1024 * 1024)))
 INJECT_STREAM_USAGE = os.getenv("INJECT_STREAM_USAGE", "1") not in ("0", "false", "no")
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 
@@ -104,10 +105,8 @@ MODEL_MAX_LEN = int(os.getenv("MODEL_MAX_LEN", "0"))
 # 这个值按整台机器的实际承受能力设置。
 GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "32"))
 
-# 单个客户端每分钟允许的鉴权失败次数。
-# 鉴权发生在 Key 限流之前，没有这层保护时，攻击者用垃圾 Key 反复请求就能持续
-# 触发 SHA-256 计算和数据库查询，却完全不消耗任何配额。
-AUTH_FAIL_MAX = int(os.getenv("AUTH_FAIL_MAX", "20"))
+# 单个客户端每分钟允许的鉴权失败次数。放宽至 60，避免同 NAT 局域网被误伤。
+AUTH_FAIL_MAX = int(os.getenv("AUTH_FAIL_MAX", "60"))
 
 # 单实例锁文件。本网关设计为单 worker 运行：限流状态虽已持久化到 SQLite，
 # 但并发计数仍在内存里，多实例会让全局并发上限实际翻倍。用文件锁挡住误启动的第二个实例。
@@ -148,10 +147,10 @@ class ConcurrencyGuard:
         self._global = 0
 
     def acquire(self, key_id: int, limit: int) -> str:
-        """返回 'ok' / 'global_full' / 'key_full'。"""
+        """返回 'ok' / 'global_full' / 'key_full'。limit <= 0 表示不限制单 Key 并发。"""
         if self._global >= GLOBAL_MAX_CONCURRENT:
             return "global_full"
-        if self._counts[key_id] >= limit:
+        if limit > 0 and self._counts[key_id] >= limit:
             return "key_full"
         self._counts[key_id] += 1
         self._global += 1
@@ -229,7 +228,7 @@ async def _fetch_model_max_len(client: httpx.AsyncClient) -> int:
 async def lifespan(app: FastAPI):
     lock = _acquire_singleton_lock(SINGLETON_LOCK)
     app.state.client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0),
+        timeout=httpx.Timeout(connect=10.0, read=600.0, write=120.0, pool=10.0),
         limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
     )
     app.state.model_max_len = MODEL_MAX_LEN or await _fetch_model_max_len(app.state.client)
@@ -405,16 +404,18 @@ async def _authorize(request: Request, ctx: AuditContext):
     ctx.key_id = key_id
     ctx.key_prefix = record["key_prefix"]
 
-    ok, retry_after = _check_rate(f"k:{key_id}", record["rpm_limit"])
-    if not ok:
-        ctx.finish(429, "rate_limited")
-        return None, _error(
-            429,
-            f"请求过于频繁，限制为每分钟 {record['rpm_limit']} 次，请 {retry_after} 秒后重试。",
-            "rate_limit_exceeded",
-            {"Retry-After": str(retry_after)},
-        )
-    store.record_event(f"k:{key_id}")
+    # rpm_limit <= 0 视为不限频（免去滑动窗口检查与数据库写开销，适用于高频 Agent）
+    if record["rpm_limit"] > 0:
+        ok, retry_after = _check_rate(f"k:{key_id}", record["rpm_limit"])
+        if not ok:
+            ctx.finish(429, "rate_limited")
+            return None, _error(
+                429,
+                f"请求过于频繁，限制为每分钟 {record['rpm_limit']} 次，请 {retry_after} 秒后重试。",
+                "rate_limit_exceeded",
+                {"Retry-After": str(retry_after)},
+            )
+        store.record_event(f"k:{key_id}")
 
     used = store.used_tokens_today(key_id)
     # daily_tokens <= 0 视为不限量（与 MAX_OUTPUT_TOKENS=0 的约定一致）

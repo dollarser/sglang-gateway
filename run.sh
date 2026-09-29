@@ -28,14 +28,17 @@ export SGLANG_API_KEY="${SGLANG_API_KEY:-}"
 # 数据库绝对路径。不要用相对路径——服务的工作目录一变就找不到库了
 export GATEWAY_DB="${GATEWAY_DB:-$HOME/gateway-data/gateway.db}"
 
-# 全局在途请求上限。这是安全阀，不是目标值，按 GPU 实际能力设
-export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-16}"
+# 全局在途请求上限。这是安全阀，放宽至 32，从容支撑多 Agent / 并发请求
+export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-32}"
 
 # 单次输出上限。
 #   0 = 不限制（推荐），由「模型上下文窗口」+「当日剩余配额」两级约束
 #   >0 = 硬上限
 # 推理模型（带思维链）尤其不要设小，否则预算会被思维链吃光、正文为空
 export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-0}"
+
+# 请求体体积上限（默认放宽至 100MB，对齐 Cloudflare 上限，从容支持图片/视频与超长 Agent 上下文）
+export MAX_BODY_BYTES="${MAX_BODY_BYTES:-104857600}"
 
 # 模型上下文窗口。留空/0 表示启动时自动从 /v1/models 探测。
 # 探测到之后，超过窗口的 max_tokens 会被钳到窗口大小，让请求正常返回内容，
@@ -50,8 +53,8 @@ export COMPAT_REWRITE="${COMPAT_REWRITE:-1}"
 # 从错误文案反算可用预算、降 max_tokens 重试一次。
 export COMPAT_CONTEXT_RETRY="${COMPAT_CONTEXT_RETRY:-1}"
 
-# 单个 IP 每分钟鉴权失败上限
-export AUTH_FAIL_MAX="${AUTH_FAIL_MAX:-20}"
+# 单个 IP 每分钟允许的鉴权失败次数，放宽至 60 避免误伤同 NAT 正常用户
+export AUTH_FAIL_MAX="${AUTH_FAIL_MAX:-60}"
 
 # 拿不到 usage 时的字节数折算系数。中文场景实测约 3.3-4.5，2.0 会高估约 2 倍。
 # 高估方向是安全的（防止配额被绕过），想更贴近实际可以调到 3.0
@@ -80,7 +83,8 @@ echo "  SGLang 后端   $SGLANG_BASE_URL"
 echo "  监听          http://$HOST:$PORT"
 echo "  数据库        $GATEWAY_DB"
 echo "  全局并发上限  $GLOBAL_MAX_CONCURRENT"
-echo "  输出上限      $MAX_OUTPUT_TOKENS"
+echo "  请求体上限    $(( MAX_BODY_BYTES / 1024 / 1024 )) MB"
+echo "  输出上限      $MAX_OUTPUT_TOKENS (0=不限)"
 echo "  兼容改写      $COMPAT_REWRITE / 上下文重试 $COMPAT_CONTEXT_RETRY"
 echo
 

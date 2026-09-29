@@ -118,15 +118,15 @@ python3 -m unittest discover -p "test_*.py"   # 40 项，不需要 SGLang
 | `SGLANG_BASE_URL` | `http://127.0.0.1:30007` | SGLang 服务地址。**填裸 SGLang，不要填兼容代理的端口**——兼容改写已内化 |
 | `SGLANG_API_KEY` | 空 | 若 SGLang 启动了 `--api-key`，在此填写，网关会自动附加 |
 | `GATEWAY_DB` | `gateway.db` | SQLite 数据库路径。**生产环境务必用绝对路径** |
-| `MAX_BODY_BYTES` | `10485760` | 请求体上限，默认 10MB |
+| `MAX_BODY_BYTES` | `104857600` | 请求体上限，默认放宽至 100MB（对齐 Cloudflare 上限，从容支持多模态图片/视频与超长 Agent 上下文） |
 | `ALLOWED_PATHS` | `chat/completions,completions,embeddings,models,rerank,score` | **转发白名单**，防路径穿越，见下方安全说明 |
 | `MAX_OUTPUT_TOKENS` | `0` | 单次输出上限。**`0` = 不限制**（推荐），由模型上下文窗口与剩余配额约束 |
 | `MODEL_MAX_LEN` | `0` | 模型上下文窗口。`0` = 启动时自动探测 |
 | `COMPAT_REWRITE` | `1` | 是否做请求兼容改写（`developer` 角色、参数别名） |
 | `COMPAT_CONTEXT_RETRY` | `1` | 上下文溢出时是否自动降 `max_tokens` 重试一次 |
 | `CONTEXT_RETRY_SAFETY_TOKENS` | `512` | 重试时的安全边距，留出上游 tokenizer 与实际的误差 |
-| `GLOBAL_MAX_CONCURRENT` | `32` | **全局**在途请求上限，按整机 GPU 承受能力设置。**实测建议 16，见下方说明** |
-| `AUTH_FAIL_MAX` | `20` | 单个客户端 IP 每分钟允许的鉴权失败次数 |
+| `GLOBAL_MAX_CONCURRENT` | `32` | **全局**在途请求上限，按整机 GPU 承受能力设置 |
+| `AUTH_FAIL_MAX` | `60` | 单个客户端 IP 每分钟允许的鉴权失败次数，默认 60 避免同 NAT 误伤 |
 | `SINGLETON_LOCK` | `<GATEWAY_DB>.lock` | 单实例锁文件路径，一般不用改 |
 | `INJECT_STREAM_USAGE` | `1` | 流式请求自动注入 `stream_options.include_usage`，便于精确统计 |
 | `CORS_ORIGINS` | `*` | 允许的跨域来源，逗号分隔。有 Web 前端时建议收紧到具体域名 |

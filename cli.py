@@ -65,6 +65,14 @@ def _fmt_quota(n: int) -> str:
     return "不限" if n <= 0 else _fmt_tokens(n)
 
 
+def _fmt_rpm(n: int) -> str:
+    return "不限" if n <= 0 else f"{n} 次/分钟"
+
+
+def _fmt_concurrent(n: int) -> str:
+    return "不限" if n <= 0 else str(n)
+
+
 def cmd_create(store: Store, args: argparse.Namespace) -> int:
     raw, row = store.create_key(
         name=args.name,
@@ -78,9 +86,9 @@ def cmd_create(store: Store, args: argparse.Namespace) -> int:
     print(f"  密钥    {raw}")
     print(f"  编号    {row['id']}")
     print(f"  名称    {row['name']}")
-    print(f"  限流    {row['rpm_limit']} 次/分钟")
+    print(f"  限流    {_fmt_rpm(row['rpm_limit'])}")
     print(f"  配额    {_fmt_quota(row['daily_tokens'])} tokens/天")
-    print(f"  并发    {row['max_concurrent']}")
+    print(f"  并发    {_fmt_concurrent(row['max_concurrent'])}")
     print(f"  过期    {row['expires_at'] or '永不过期'}")
     print("\n客户端配置：")
     print(f"  base_url = <你的域名>/v1")
@@ -101,7 +109,7 @@ def cmd_list(store: Store, args: argparse.Namespace) -> int:
             r["id"],
             r["key_prefix"],
             r["name"],
-            f"{r['rpm_limit']}/min",
+            "不限" if r["rpm_limit"] <= 0 else f"{r['rpm_limit']}/min",
             _fmt_quota(r["daily_tokens"]),
             r["expires_at"] or "永不过期",
             "已吊销" if r["revoked"] else "有效",
@@ -215,9 +223,9 @@ def main() -> int:
 
     p_create = sub.add_parser("create", help="创建一个新的 API Key")
     p_create.add_argument("--name", required=True, help="使用者名称，便于识别")
-    p_create.add_argument("--rpm", type=int, default=60, help="每分钟请求上限")
-    p_create.add_argument("--daily-tokens", type=int, default=2_000_000, help="每日 token 配额")
-    p_create.add_argument("--max-concurrent", type=int, default=4, help="并发请求上限")
+    p_create.add_argument("--rpm", type=int, default=300, help="每分钟请求上限（默认 300，0 表示不限）")
+    p_create.add_argument("--daily-tokens", type=int, default=20_000_000, help="每日 token 配额（默认 2000 万，0 表示不限）")
+    p_create.add_argument("--max-concurrent", type=int, default=16, help="并发请求上限（默认 16，0 表示不限）")
     p_create.add_argument("--expires", default=None, help="有效期，如 30d / 12h / 2026-12-31")
     p_create.add_argument("--note", default=None, help="备注")
     p_create.set_defaults(func=cmd_create)
