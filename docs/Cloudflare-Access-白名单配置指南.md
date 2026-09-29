@@ -97,7 +97,7 @@ ingress:
   - service: http_status:404
 ```
 
-这里指向的是 **Nginx 的 2233**，不是 SGLang 的 30000。最后一条兜底规则必须有，否则未匹配的请求可能被转发到错误的服务。
+这里指向的是 **Nginx 的 2233**，不是 SGLang 的 30007。最后一条兜底规则必须有，否则未匹配的请求可能被转发到错误的服务。
 
 ## 5. Nginx 网关
 
@@ -110,7 +110,7 @@ server {
     location /v1/ {
         limit_req zone=llm burst=10 nodelay;
 
-        proxy_pass http://127.0.0.1:30000;
+        proxy_pass http://127.0.0.1:30007;
         proxy_http_version 1.1;
 
         proxy_buffering off;          # 流式输出必须关，否则 SSE 会攒成一次性返回

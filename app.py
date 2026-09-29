@@ -1,16 +1,20 @@
 """SGLang API 网关：基于 API Key 的鉴权、限流与用量统计。
 
 链路：
-    公网 -> Cloudflare Tunnel -> 本网关(:8080) -> SGLang(:30000)
+    公网 -> Cloudflare Tunnel -> 本网关(:2233) -> SGLang(:30007)
 
 职责：
     1. 校验 Authorization: Bearer <key>（或 x-api-key）
     2. 每分钟请求数限流 + 每日 token 配额 + 单 key 并发上限
-    3. 透明转发到 SGLang，完整支持 SSE 流式输出
+    3. 请求兼容改写（见 compat.py），然后转发到 SGLang，完整支持 SSE 流式输出
     4. 记录用量，便于后续计费或配额调整
 
+兼容改写原先由一个独立的代理进程承担（`30008 -> 30007`），现已内化到
+`compat.py`，链路由四跳减为三跳。**网关直接连裸 SGLang。**
+
 启动：
-    uvicorn app:app --host 127.0.0.1 --port 8080
+    ./run.sh
+    或 uvicorn app:app --host 127.0.0.1 --port 2233
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+import compat
 from store import Store, hash_key
 
 try:
@@ -52,12 +57,17 @@ if not logging.getLogger().handlers:
 
 # ---------------- 配置 ----------------
 
-SGLANG_BASE_URL = os.getenv("SGLANG_BASE_URL", "http://127.0.0.1:30000").rstrip("/")
+SGLANG_BASE_URL = os.getenv("SGLANG_BASE_URL", "http://127.0.0.1:30007").rstrip("/")
 SGLANG_API_KEY = os.getenv("SGLANG_API_KEY", "")
 GATEWAY_DB = os.getenv("GATEWAY_DB", "gateway.db")
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(10 * 1024 * 1024)))
 INJECT_STREAM_USAGE = os.getenv("INJECT_STREAM_USAGE", "1") not in ("0", "false", "no")
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+
+# 兼容改写开关。默认开启；上游升级后不再需要时可以单独关掉，不用改代码。
+COMPAT_REWRITE = os.getenv("COMPAT_REWRITE", "1") not in ("0", "false", "no")
+# 上下文溢出重试开关。关掉后上游的 400 会原样透出，不再自动降 max_tokens。
+COMPAT_CONTEXT_RETRY = os.getenv("COMPAT_CONTEXT_RETRY", "1") not in ("0", "false", "no")
 
 # 粗估 token 的兜底系数：拿不到 usage 时按字符数折算
 CHARS_PER_TOKEN = float(os.getenv("CHARS_PER_TOKEN", "2.0"))
@@ -72,13 +82,15 @@ ALLOWED_PATHS = {
 # 单次请求的输出上限。
 #   0  = 不限制，交由「模型上下文窗口」和「该 Key 当日剩余配额」两级约束（推荐）
 #   >0 = 硬上限，超出会被钳制
-# 注意：不要指望上游帮你兜住超限的 max_tokens——SGLang 对超过 max_model_len 的
-# 取值直接返回 400，而且 **body 是空的**，客户端完全看不出原因。所以这里宁可钳制。
+# 钳制的意义是「让请求正常返回内容」，而不是「规避一个看不懂的报错」：
+# SGLang 对超过 max_model_len 的 max_tokens 会返回 400，报错文案本身是清楚的
+# （`max_completion_tokens is too large: 999999. This model supports at most 262144
+# completion tokens.`），但对客户端来说这仍是一次失败。钳到窗口内就能拿到结果。
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "0"))
 
 # 模型上下文窗口。0 表示启动时自动从上游 /v1/models 的 max_model_len 探测。
 # 探测到之后，超过窗口的 max_tokens 会被钳到窗口大小，用户拿到的是正常响应，
-# 而不是一个空 body 的 400。
+# 而不是一个 400 报错。
 MODEL_MAX_LEN = int(os.getenv("MODEL_MAX_LEN", "0"))
 
 # 全局并发上限。只限制单 Key 是不够的：50 个用户各开 4 路并发就是 200 路，足以打爆 GPU。
@@ -180,8 +192,8 @@ def _acquire_singleton_lock(path: str):
 async def _probe_model_max_len(client: httpx.AsyncClient) -> int:
     """从上游 /v1/models 读 max_model_len，作为输出长度的天然上限。
 
-    为什么要探测它：SGLang 对 max_tokens > max_model_len 的请求返回 **400 且 body 为空**，
-    客户端只能看到一个没有任何说明的错误。钳到窗口大小之后，同样的请求会正常返回内容。
+    为什么要探测它：SGLang 对 max_tokens > max_model_len 的请求返回 400
+    （报错文案清楚，但请求毕竟失败了）。钳到窗口大小之后，同样的请求会正常返回内容。
 
     探测失败不致命——退回「不做窗口钳制」，并在日志里说清楚。
     """
@@ -429,6 +441,15 @@ def _usage_from_obj(obj: Any) -> tuple[int, int, Optional[str]]:
     )
 
 
+def _json_bytes(obj: Any) -> bytes:
+    """紧凑序列化请求体。
+
+    `ensure_ascii=False` 让中文按 UTF-8 直出，比 `\\uXXXX` 转义省一半字节；
+    分隔符去掉空格，长 messages 数组能省下可观体积。
+    """
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def _record(key_id: int, model, pt: int, ct: int, status: int, started: float) -> None:
     """写入用量。拿不到真实 usage 时按字符数粗估，保证配额不会被绕过。"""
     store.record_usage(
@@ -524,35 +545,38 @@ async def proxy(path: str, request: Request):
                 pass
 
         is_stream = bool(payload.get("stream"))
-        mutated = False
 
-        if is_stream and INJECT_STREAM_USAGE and "stream_options" not in payload:
-            payload["stream_options"] = {"include_usage": True}
-            mutated = True
+        if payload:
+            # 1. 兼容改写（developer 角色、reasoning_effort 别名、output_config）。
+            #    放在钳制之前：改写可能重建整个 messages 数组。
+            if COMPAT_REWRITE:
+                payload = compat.rewrite_payload(payload)
 
-        # 输出长度钳制。三级上限取最小值，每一级都可以单独关闭：
-        #   1. MAX_OUTPUT_TOKENS —— 全局硬上限，0 表示不设
-        #   2. 模型上下文窗口     —— 启动时自动探测，避免上游返回空 body 的 400
-        #   3. 当日剩余配额       —— 防止单次请求把当天额度打穿
-        # 三者都为 0 时不做任何钳制，完全交给上游。
-        caps = []
-        if MAX_OUTPUT_TOKENS > 0:
-            caps.append(MAX_OUTPUT_TOKENS)
-        if request.app.state.model_max_len:
-            caps.append(request.app.state.model_max_len)
-        if ctx.remaining_quota > 0:
-            caps.append(ctx.remaining_quota)
-        cap = min(caps) if caps else None
+            # 2. 流式请求注入 stream_options，好从数据流里抓到 usage 用于计费
+            if is_stream and INJECT_STREAM_USAGE and "stream_options" not in payload:
+                payload["stream_options"] = {"include_usage": True}
 
-        if cap is not None:
-            for field in ("max_tokens", "max_completion_tokens"):
-                value = payload.get(field)
-                if isinstance(value, int) and value > cap:
-                    payload[field] = cap
-                    mutated = True
+            # 3. 输出长度钳制。三级上限取最小值，每一级都可以单独关闭：
+            #    a. MAX_OUTPUT_TOKENS —— 全局硬上限，0 表示不设
+            #    b. 模型上下文窗口     —— 启动时自动探测
+            #    c. 当日剩余配额       —— 防止单次请求把当天额度打穿
+            # 三者都为 0 时不做任何钳制，完全交给上游。
+            caps = []
+            if MAX_OUTPUT_TOKENS > 0:
+                caps.append(MAX_OUTPUT_TOKENS)
+            if request.app.state.model_max_len:
+                caps.append(request.app.state.model_max_len)
+            if ctx.remaining_quota > 0:
+                caps.append(ctx.remaining_quota)
+            cap = min(caps) if caps else None
 
-        if mutated:
-            body = json.dumps(payload).encode("utf-8")
+            if cap is not None:
+                for field in compat.MAX_TOKENS_FIELDS:
+                    value = payload.get(field)
+                    if isinstance(value, int) and value > cap:
+                        payload[field] = cap
+
+            body = _json_bytes(payload)
 
         upstream_headers = {
             "content-type": request.headers.get("content-type", "application/json"),
@@ -564,10 +588,55 @@ async def proxy(path: str, request: Request):
 
         upstream = f"{SGLANG_BASE_URL}/v1/{safe_path}"
         client: httpx.AsyncClient = request.app.state.client
-        req = client.build_request(
-            request.method, upstream, content=body, headers=upstream_headers
-        )
-        resp = await client.send(req, stream=True)
+
+        def send_upstream() -> Any:
+            return client.send(
+                client.build_request(
+                    request.method, upstream, content=body, headers=upstream_headers
+                ),
+                stream=True,
+            )
+
+        resp = await send_upstream()
+
+        # ---- 上下文溢出重试 ----
+        # 上游对「输入 + max_tokens 超过模型窗口」返回 400。网关的窗口钳制管不了
+        # 这种组合溢出——输入本身已经很长了，只能从错误文案里反算可用预算再试一次。
+        #
+        # 这里曾经有个 bug：旧实现不管重不重试都先 `await resp.aread()` 把 body 读掉，
+        # 不重试时后续 `aiter_raw()` 会抛 StreamConsumed，客户端收到一个**空 body 的
+        # 400**，完全看不出原因。现在 body 只在两条互斥的分支里被消费：
+        # 要么拿去算预算并重试，要么原样回传给客户端。
+        if resp.status_code == 400 and COMPAT_CONTEXT_RETRY and payload:
+            error_body = await resp.aread()
+            await resp.aclose()
+            budget = compat.context_retry_budget(error_body, payload)
+            if budget is not None:
+                field, reduced = budget
+                logger.info(
+                    "上下文溢出：%s %s -> %d，重试一次",
+                    field,
+                    payload.get(field),
+                    reduced,
+                )
+                payload[field] = reduced
+                body = _json_bytes(payload)
+                resp = await send_upstream()
+            else:
+                # 不是上下文溢出，或输入已占满窗口无预算可降。
+                # 把上游的错误原样透出，让客户端看到
+                # `max_completion_tokens is too large: 999999. ...` 这类明确信息。
+                # 注意这里**必须**回传 error_body：绝不能再走下面的流式/非流式分支，
+                # 因为 body 已经被 aread() 消费掉了，那条路只会得到空响应。
+                _record(key_id, payload.get("model"), 0, 0, 400, started)
+                release_once()
+                ctx.model = payload.get("model")
+                ctx.finish(400, "upstream_error")
+                return Response(
+                    content=error_body,
+                    status_code=400,
+                    media_type="application/json",
+                )
 
         if is_stream:
             # 流式的审计记录在流结束后由 _stream_and_record 落，这样才带得上 token 数
@@ -588,8 +657,9 @@ async def proxy(path: str, request: Request):
             pt, ct, model = _usage_from_obj(json.loads(content))
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
-        # 只有会产生推理开销的 POST 请求才做兜底估算，避免 GET /v1/models 被计入配额
-        if pt == 0 and ct == 0 and request.method == "POST":
+        # 只有「会产生推理开销」的 POST 才做兜底估算：
+        # 跳过 GET /v1/models，也跳过 4xx——请求失败时没有推理发生，不该扣配额。
+        if pt == 0 and ct == 0 and request.method == "POST" and resp.status_code < 400:
             ct = int(len(content) / CHARS_PER_TOKEN)
 
         ctx.model = model or payload.get("model")
@@ -671,7 +741,7 @@ async def _stream_and_record(
         # 客户端断连时这个生成器会被取消，如果先 await 清理，取消异常可能让后续代码
         # 不再执行，导致并发计数永久泄漏——该 Key 从此再也发不出请求，只能重启网关。
         try:
-            if pt == 0 and ct == 0:
+            if pt == 0 and ct == 0 and status < 400:
                 ct = int(char_count / CHARS_PER_TOKEN)
             _record(key_id, model, pt, ct, status, started)
         except Exception:

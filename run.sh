@@ -13,8 +13,9 @@ cd "$(dirname "$0")"
 
 # ---------------- 配置区：按你的实际情况改这里 ----------------
 
-# SGLang 服务地址。注意不是默认的 30000，你的服务在 30008
-export SGLANG_BASE_URL="${SGLANG_BASE_URL:-http://127.0.0.1:30008}"
+# SGLang 服务地址。**直连裸 SGLang**，不要填兼容代理的端口——
+# 兼容改写（developer 角色、上下文溢出重试）已内化到 compat.py，多一跳没有意义。
+export SGLANG_BASE_URL="${SGLANG_BASE_URL:-http://127.0.0.1:30007}"
 
 # SGLang 若启用了 --api-key，在这里填；没启用就留空
 export SGLANG_API_KEY="${SGLANG_API_KEY:-}"
@@ -32,9 +33,17 @@ export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-16}"
 export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-0}"
 
 # 模型上下文窗口。留空/0 表示启动时自动从 /v1/models 探测。
-# 探测到之后，超过窗口的 max_tokens 会被钳到窗口大小——因为 SGLang 对超限值
-# 返回的是空 body 的 400，客户端看不出原因。探测失败时可用这个变量手工指定。
+# 探测到之后，超过窗口的 max_tokens 会被钳到窗口大小，让请求正常返回内容，
+# 而不是拿到一个 400。探测失败时可用这个变量手工指定。
 export MODEL_MAX_LEN="${MODEL_MAX_LEN:-0}"
+
+# 兼容改写：developer 角色折叠进 system、reasoning_effort 别名、摘掉 output_config。
+# 上游升级后不再需要时可以设为 0 关掉，不用改代码。
+export COMPAT_REWRITE="${COMPAT_REWRITE:-1}"
+
+# 上下文溢出自动重试：上游因「输入 + max_tokens 超窗口」返回 400 时，
+# 从错误文案反算可用预算、降 max_tokens 重试一次。
+export COMPAT_CONTEXT_RETRY="${COMPAT_CONTEXT_RETRY:-1}"
 
 # 单个 IP 每分钟鉴权失败上限
 export AUTH_FAIL_MAX="${AUTH_FAIL_MAX:-20}"
@@ -67,6 +76,7 @@ echo "  监听          http://$HOST:$PORT"
 echo "  数据库        $GATEWAY_DB"
 echo "  全局并发上限  $GLOBAL_MAX_CONCURRENT"
 echo "  输出上限      $MAX_OUTPUT_TOKENS"
+echo "  兼容改写      $COMPAT_REWRITE / 上下文重试 $COMPAT_CONTEXT_RETRY"
 echo
 
 exec "$PYTHON" -m uvicorn app:app --host "$HOST" --port "$PORT" "$@"

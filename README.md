@@ -22,14 +22,31 @@ Cloudflare Tunnel (cloudflared)
    ├─ 2. 每分钟请求数限流（状态持久化，重启不清零）
    ├─ 3. 每日 token 配额
    ├─ 4. 单 Key 并发上限 + 全局并发闸门
-   ├─ 5. 记录用量
-   └─ 6. 记录审计日志（含被拒绝的请求）
+   ├─ 5. 请求兼容改写（developer 角色 / 参数别名 / 上下文溢出重试）
+   ├─ 6. 记录用量
+   └─ 7. 记录审计日志（含被拒绝的请求）
    │
    ▼
-SGLang 127.0.0.1:30000  (只监听回环)
+SGLang 127.0.0.1:30007  (只监听回环)
 ```
 
 网关对客户端完全透明，支持 SSE 流式输出。
+
+### 关于「兼容改写」
+
+Qwen3.8-27B 的 SGLang 服务有三处与 OpenAI 客户端不完全兼容，网关在转发前会就地修掉（见 `compat.py`）：
+
+| 情况 | 裸 SGLang 的表现 | 网关的处理 |
+|---|---|---|
+| `messages` 里有 `developer` 角色 | `400 Unexpected message role.` | 折叠进第一条 system 消息 |
+| 输入 + `max_tokens` 超过模型窗口 | `400 Requested token count exceeds ...` | 从错误文案反算可用预算，降 `max_tokens` 重试一次 |
+| `reasoning_effort=high` | Qwen 侧认的是 `xhigh` | 别名映射 |
+| `output_config.effort`（Anthropic 风格） | 上游不认识 | 摘掉该键 |
+
+这段逻辑原本由一个独立的小代理进程承担（`30008 -> 30007`），2026-09-29 内化进网关，
+链路由四跳减为三跳，少一个进程、少一次转发、少一个能被直接打到的无鉴权端口。
+
+两个开关可以单独关掉：`COMPAT_REWRITE=0`、`COMPAT_CONTEXT_RETRY=0`。
 
 ## 快速开始
 
@@ -48,7 +65,7 @@ python cli.py create --name alice --rpm 60 --daily-tokens 2000000 --expires 90d
 `run.sh` 把端口、后端地址、并发上限这些参数都固化在文件头部，改完直接跑，不用每次敲一长串命令。当前默认：
 
 ```
-SGLang 后端   http://127.0.0.1:30008
+SGLang 后端   http://127.0.0.1:30007
 监听          http://127.0.0.1:2233
 数据库        ~/gateway-data/gateway.db
 ```
@@ -56,21 +73,30 @@ SGLang 后端   http://127.0.0.1:30008
 也可以临时覆盖：`PORT=3000 ./run.sh`。不想用脚本就手动起：
 
 ```bash
-export SGLANG_BASE_URL=http://127.0.0.1:30008
+export SGLANG_BASE_URL=http://127.0.0.1:30007
 uvicorn app:app --host 127.0.0.1 --port 2233
+```
+
+兼容层的单元测试（纯标准库，不需要 SGLang）：
+
+```bash
+python3 test_compat.py        # 23 项，覆盖角色折叠、参数别名、上下文预算反算
 ```
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `SGLANG_BASE_URL` | `http://127.0.0.1:30000` | SGLang 服务地址。**当前部署实际是 `30008`，必须显式设置** |
+| `SGLANG_BASE_URL` | `http://127.0.0.1:30007` | SGLang 服务地址。**填裸 SGLang，不要填兼容代理的端口**——兼容改写已内化 |
 | `SGLANG_API_KEY` | 空 | 若 SGLang 启动了 `--api-key`，在此填写，网关会自动附加 |
 | `GATEWAY_DB` | `gateway.db` | SQLite 数据库路径。**生产环境务必用绝对路径** |
 | `MAX_BODY_BYTES` | `10485760` | 请求体上限，默认 10MB |
 | `ALLOWED_PATHS` | `chat/completions,completions,embeddings,models,rerank,score` | **转发白名单**，防路径穿越，见下方安全说明 |
 | `MAX_OUTPUT_TOKENS` | `0` | 单次输出上限。**`0` = 不限制**（推荐），由模型上下文窗口与剩余配额约束 |
 | `MODEL_MAX_LEN` | `0` | 模型上下文窗口。`0` = 启动时自动探测 |
+| `COMPAT_REWRITE` | `1` | 是否做请求兼容改写（`developer` 角色、参数别名） |
+| `COMPAT_CONTEXT_RETRY` | `1` | 上下文溢出时是否自动降 `max_tokens` 重试一次 |
+| `CONTEXT_RETRY_SAFETY_TOKENS` | `512` | 重试时的安全边距，留出上游 tokenizer 与实际的误差 |
 | `GLOBAL_MAX_CONCURRENT` | `32` | **全局**在途请求上限，按整机 GPU 承受能力设置。**实测建议 16，见下方说明** |
 | `AUTH_FAIL_MAX` | `20` | 单个客户端 IP 每分钟允许的鉴权失败次数 |
 | `SINGLETON_LOCK` | `<GATEWAY_DB>.lock` | 单实例锁文件路径，一般不用改 |
@@ -86,7 +112,7 @@ uvicorn app:app --host 127.0.0.1 --port 2233
 
 | 参数 | 默认 | 改成 | 原因 |
 |---|---|---|---|
-| `SGLANG_BASE_URL` | `127.0.0.1:30000` | `127.0.0.1:30008` | 你的服务不在默认端口，不改会全部 502 |
+| `SGLANG_BASE_URL` | `127.0.0.1:30000` | `127.0.0.1:30007` | 你的服务不在默认端口，不改会全部 502。**填裸 SGLang 的端口** |
 | `GATEWAY_DB` | `gateway.db` | 绝对路径，如 `~/gateway-data/gateway.db` | 相对路径依赖工作目录，systemd 启动时目录不同就找不到库，会**静默新建一个空库**——表现为所有 Key 突然失效 |
 
 #### 建议调的
@@ -224,20 +250,18 @@ python cli.py audit --days 7 --key-id 3                 # 查某把 Key 的调�
 
 ### 为什么要自动探测上下文窗口
 
-因为**上游对超窗口的取值返回的是空 body 的 400**。实测：
+因为**上游对超过 `max_model_len` 的 `max_tokens` 直接拒绝**。实测（直连裸 SGLang）：
 
 | 直连 SGLang，max_tokens= | 结果 |
 |---|---|
 | 262144（= `max_model_len`） | ✅ 200 |
-| 300000 | ❌ 400，**body 完全为空** |
-| 1000000 | ❌ 400，body 空 |
+| 300000 | ❌ 400 `max_completion_tokens is too large: 300000. This model supports at most 262144 completion tokens.` |
 
-客户端只能看到一个没有任何说明的 400，根本不知道是自己 `max_tokens` 填大了。
-
+报错文案本身是清楚的，但对客户端来说这仍是一次失败——很多 SDK 只会把 `message` 直接弹给用户。
 网关启动时从 `/v1/models` 读 `max_model_len`（本机实测 `262144`），把超出的值钳到窗口大小，同样的请求就变成正常响应：
 
 ```
-直连：      max_tokens=300000  ->  400（空 body）
+直连：      max_tokens=300000  ->  400
 经网关：    max_tokens=300000  ->  200，正常返回内容
 ```
 
@@ -249,7 +273,15 @@ INFO [gateway] 输出长度上限：MAX_OUTPUT_TOKENS=不限，模型上下文�
 
 探测失败（比如网关比 SGLang 先启动）不致命，只是不做窗口钳制，日志里会提示。可以显式指定 `MODEL_MAX_LEN=262144` 跳过探测。
 
-> 顺带说明：SGLang 对「prompt + max_tokens 超过窗口」的情况自己会收敛。实测 4052 tokens 的 prompt 配 `max_tokens=262144` 返回 200 正常。它只在 `max_tokens` 本身超过 `max_model_len` 时才报 400。
+> **两类溢出要分清。** 窗口钳制只管「`max_tokens` 本身超窗口」；而「输入已经很长、输出预算还拉满」是另一种溢出，
+> 上游同样返回 400，只能靠 `COMPAT_CONTEXT_RETRY` 反算预算后重试。实测：9200 字的 prompt
+> （约 5600 tokens）配 `max_tokens=262144`，裸 SGLang 返回
+> `400 Requested token count exceeds the model's maximum context length of 262144 tokens.`，
+> 经网关则自动降到 `256016` 重试并返回 200。
+>
+> ⚠️ **更正**：本文档早期版本写的「SGLang 对 prompt + max_tokens 超窗口会自己收敛，只在 max_tokens 本身超限时才报 400」
+> 是错的。那个结论是在**经过兼容代理**的链路上测出来的——代理在背后偷偷降 `max_tokens` 重试了一次，
+> 把 400 变成了 200，看起来就像上游「自己收敛」了。直连复测即可推翻。
 
 ### 剩余配额钳制
 
@@ -403,7 +435,7 @@ ingress:
   - service: http_status:404
 ```
 
-这样 Key 鉴权在网关层完成，SGLang 的 30008 端口始终不暴露。
+这样 Key 鉴权在网关层完成，SGLang 的 30007 端口始终不暴露。
 
 **本机实际部署**：隧道 `sglang-gateway` → `http://127.0.0.1:2233`。
 从零操作步骤见 [`docs/Cloudflare-Tunnel-创建与域名绑定.md`](docs/Cloudflare-Tunnel-创建与域名绑定.md)。
@@ -422,7 +454,7 @@ After=network.target
 Type=simple
 User=youruser
 WorkingDirectory=/opt/gateway
-Environment="SGLANG_BASE_URL=http://127.0.0.1:30000"
+Environment="SGLANG_BASE_URL=http://127.0.0.1:30007"
 Environment="GATEWAY_DB=/opt/gateway/gateway.db"
 ExecStart=/usr/bin/uvicorn app:app --host 127.0.0.1 --port 2233
 Restart=always
@@ -441,8 +473,16 @@ macOS 上用 launchd，或直接 `nohup uvicorn ... &`。
 3. **SGLang 始终只监听回环**，`--host 127.0.0.1`，并额外设置 `--api-key` 做第二层防护。
 4. **定期 `cleanup`**，避免 `usage_log` 无限增长。
 5. Key 泄露时立刻 `revoke`，比改密码快。
+6. **不要在网关和 SGLang 之间再插一个无鉴权的转发层。** 之前那个兼容代理转发**所有**路径
+   （包括 `/flush_cache`、`/get_server_info` 这类管理端点）且自身不做任何鉴权，只靠「绑 127.0.0.1
+   + 网关的路径白名单」兜着。这类中间层一旦被误绑到 `0.0.0.0`，就等于把 SGLang 的管理面直接挂到网上。
+   兼容逻辑内化进网关后，这个风险点已经消失——**路径白名单是唯一的入口，且它对所有请求生效**。
 
 ## 已知局限
+
+- **网关不再是「纯透明代理」**。它会在转发前改写请求体（折叠 `developer` 角色、重试时降 `max_tokens`）。
+  这意味着网关需要解析完整 JSON body，不能退化成纯字节流转发；也意味着**上游看到的是改写后的请求**，
+  排查问题时要以网关日志里的「兼容改写」行为准。不需要改写时可以 `COMPAT_REWRITE=0` 关掉。
 
 - **必须单 worker 运行**。限流状态已经持久化到 SQLite，但**并发计数仍在内存里**，多 worker 会让全局并发上限实际翻倍。网关启动时会用文件锁挡住第二个实例——误启动会直接报错退出，而不是静默地让限制失效。
 - **每个请求多几次本地数据库往返**。限流、配额、用量、审计都要落盘，比纯内存实现多了一点开销。对 LLM 这种秒级响应的服务可以忽略；如果 QPS 达到数百，建议把限流换回内存实现（接受重启清零）或改用 Redis。

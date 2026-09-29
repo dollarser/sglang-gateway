@@ -209,7 +209,7 @@ EOF
 
 **两个最容易踩的坑：**
 
-1. **`service` 要指向网关的 2233，不是 SGLang 的 30008。** 用户的请求必须先过网关做鉴权，不能直连推理服务。
+1. **`service` 要指向网关的 2233，不是 SGLang 的 30007。** 用户的请求必须先过网关做鉴权，不能直连推理服务。
 2. **最后那条 `- service: http_status:404` 不能少。** 它是「其他情况」的兜底。没有它，cloudflared 启动时会直接报错，或者把不匹配的请求转到错误的地方。
 
 **校验配置有没有写错：**
@@ -327,7 +327,7 @@ sudo systemctl status cloudflared
 
 ```bash
 # 1) 三个组件都在
-curl -s http://127.0.0.1:30008/v1/models -H "Authorization: Bearer 后端密钥"   # SGLang
+curl -s http://127.0.0.1:30007/v1/models -H "Authorization: Bearer 后端密钥"   # SGLang
 curl -s http://127.0.0.1:2233/healthz                                        # 网关
 launchctl list | grep cloudflare                                             # 隧道（macOS）
 
