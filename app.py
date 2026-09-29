@@ -67,8 +67,8 @@ if not logging.getLogger().handlers:
 SGLANG_BASE_URL = os.getenv("SGLANG_BASE_URL", "http://127.0.0.1:30007").rstrip("/")
 SGLANG_API_KEY = os.getenv("SGLANG_API_KEY", "")
 GATEWAY_DB = os.getenv("GATEWAY_DB", "gateway.db")
-# 请求体上限：默认放宽至 100MB（对齐 Cloudflare 免费版上限，从容支持多模态高清图/视频与超长 Agent 上下文）
-MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(100 * 1024 * 1024)))
+# 请求体上限：默认 60MB（严格低于 64MB，兼顾多模态高清图/短视频与网络稳定性）
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", str(60 * 1024 * 1024)))
 INJECT_STREAM_USAGE = os.getenv("INJECT_STREAM_USAGE", "1") not in ("0", "false", "no")
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 
@@ -101,9 +101,9 @@ MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "0"))
 # 而不是一个 400 报错。
 MODEL_MAX_LEN = int(os.getenv("MODEL_MAX_LEN", "0"))
 
-# 全局并发上限。只限制单 Key 是不够的：50 个用户各开 4 路并发就是 200 路，足以打爆 GPU。
-# 这个值按整台机器的实际承受能力设置。
-GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "32"))
+# 全局并发上限。严格按整台机器 SGLang 的承载能力匹配（后端 --max-running-requests 设为 4 时对齐设为 4）。
+# 避免过量并发冲垮 GPU 显存与调度队列；当突发超过 4 时网关安全拦截并返回 503，防止服务雪崩。
+GLOBAL_MAX_CONCURRENT = int(os.getenv("GLOBAL_MAX_CONCURRENT", "4"))
 
 # 单个客户端每分钟允许的鉴权失败次数。放宽至 60，避免同 NAT 局域网被误伤。
 AUTH_FAIL_MAX = int(os.getenv("AUTH_FAIL_MAX", "60"))

@@ -223,9 +223,9 @@ def main() -> int:
 
     p_create = sub.add_parser("create", help="创建一个新的 API Key")
     p_create.add_argument("--name", required=True, help="使用者名称，便于识别")
-    p_create.add_argument("--rpm", type=int, default=300, help="每分钟请求上限（默认 300，0 表示不限）")
-    p_create.add_argument("--daily-tokens", type=int, default=20_000_000, help="每日 token 配额（默认 2000 万，0 表示不限）")
-    p_create.add_argument("--max-concurrent", type=int, default=16, help="并发请求上限（默认 16，0 表示不限）")
+    p_create.add_argument("--rpm", type=int, default=60, help="每分钟请求上限（默认 60）")
+    p_create.add_argument("--daily-tokens", type=int, default=2_000_000, help="每日 token 配额（默认 200 万）")
+    p_create.add_argument("--max-concurrent", type=int, default=2, help="单 Key 并发上限（默认 2，全局上限 4）")
     p_create.add_argument("--expires", default=None, help="有效期，如 30d / 12h / 2026-12-31")
     p_create.add_argument("--note", default=None, help="备注")
     p_create.set_defaults(func=cmd_create)

@@ -28,8 +28,8 @@ export SGLANG_API_KEY="${SGLANG_API_KEY:-}"
 # 数据库绝对路径。不要用相对路径——服务的工作目录一变就找不到库了
 export GATEWAY_DB="${GATEWAY_DB:-$HOME/gateway-data/gateway.db}"
 
-# 全局在途请求上限。这是安全阀，放宽至 32，从容支撑多 Agent / 并发请求
-export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-32}"
+# 全局在途请求上限。按 SGLang 承载能力设（后端 --max-running-requests 为 4 时设为 4，防止并发压垮显存）
+export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-4}"
 
 # 单次输出上限。
 #   0 = 不限制（推荐），由「模型上下文窗口」+「当日剩余配额」两级约束
@@ -37,8 +37,8 @@ export GLOBAL_MAX_CONCURRENT="${GLOBAL_MAX_CONCURRENT:-32}"
 # 推理模型（带思维链）尤其不要设小，否则预算会被思维链吃光、正文为空
 export MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-0}"
 
-# 请求体体积上限（默认放宽至 100MB，对齐 Cloudflare 上限，从容支持图片/视频与超长 Agent 上下文）
-export MAX_BODY_BYTES="${MAX_BODY_BYTES:-104857600}"
+# 请求体体积上限（默认 60MB，严格低于 64MB，容纳多模态图片/短视频并保证传输稳定）
+export MAX_BODY_BYTES="${MAX_BODY_BYTES:-62914560}"
 
 # 模型上下文窗口。留空/0 表示启动时自动从 /v1/models 探测。
 # 探测到之后，超过窗口的 max_tokens 会被钳到窗口大小，让请求正常返回内容，
