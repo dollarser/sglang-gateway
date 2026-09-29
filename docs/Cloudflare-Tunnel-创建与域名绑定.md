@@ -396,8 +396,22 @@ curl -N https://llm.example.com/v1/chat/completions \
    urllib.request.Request(url, headers={"User-Agent": "OpenAI/Python 1.60.0"})
    ```
 
-> 注意：用 `cloudflared tunnel login` 得到的 `cert.pem`，里面那个 `cfut_` 开头的 Token
-> **只有 Tunnel 相关权限**，调不了 zone 级别的安全设置接口，这一步必须去控制台点。
+> **`cert.pem` 的权限边界**（实测，不是推测）：
+>
+> 它 base64 解码后只有三个字段 —— `zoneID` / `accountID` / `apiToken`，其中 `apiToken` 是
+> `cfut_` 开头的 token。拿它调 Cloudflare API 实测：
+>
+> | 能做 | 不能做 |
+> |---|---|
+> | 读写该域名的 **DNS 记录** | zone 级安全设置（Browser Integrity Check）→ `9109 Unauthorized` |
+> | 管理账号下的**隧道对象**（list / info / create / delete） | 防火墙 / WAF 规则 → `10000 Authentication error` |
+> | 读账号基本信息 | 碰其他域名 —— 只有你授权的那一个 zone 可见 |
+>
+> 所以它**调不了 zone 级安全接口**，上面第 1 步必须去控制台点。
+>
+> 也正因为它是 zone 级的，`cert.pem` **只在管理操作时才需要**：
+> 运行隧道（`cloudflared tunnel run`）用的是隧道级的 `<TUNNEL_ID>.json`，两者互不依赖。
+> 换句话说，**不传 `cert.pem` 也能把服务跑起来**，只是 `tunnel list / info / route dns` 用不了。
 
 **看实时日志排查：**
 

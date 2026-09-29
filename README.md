@@ -498,6 +498,8 @@ macOS 上用 launchd，或直接 `nohup uvicorn ... &`。
 
 1. **网关只监听 `127.0.0.1`**，对外一律经 Cloudflare Tunnel，不要开放公网端口。
 2. **数据库文件权限设为 600**，虽然只存哈希，但用量数据也有隐私价值。
+   **并且启动脚本里要有 `umask 077`**——代码里逐文件 `chmod` 只覆盖 DB 和 `-wal` / `-shm`，
+   管不到日志、锁文件和 `gateway-data/` 目录本身，而且手工 `chmod` 的目录权限重启就打回原形。
 3. **SGLang 始终只监听回环**，`--host 127.0.0.1`，并额外设置 `--api-key` 做第二层防护。
 4. **定期 `cleanup`**，避免 `usage_log` 无限增长。
 5. Key 泄露时立刻 `revoke`，比改密码快。
@@ -505,6 +507,9 @@ macOS 上用 launchd，或直接 `nohup uvicorn ... &`。
    （包括 `/flush_cache`、`/get_server_info` 这类管理端点）且自身不做任何鉴权，只靠「绑 127.0.0.1
    + 网关的路径白名单」兜着。这类中间层一旦被误绑到 `0.0.0.0`，就等于把 SGLang 的管理面直接挂到网上。
    兼容逻辑内化进网关后，这个风险点已经消失——**路径白名单是唯一的入口，且它对所有请求生效**。
+7. **确认 `/openapi.json`、`/docs`、`/redoc` 都返回 404。** 这三个是 FastAPI 自动注册的端点，
+   **不需要 Key** 就能拿到完整路由表和参数 schema。它们**不经过**路径白名单（白名单只管 `/v1/{path}`），
+   所以必须自己单独验一遍——本仓库已设 `openapi_url=None`，但你改动 `FastAPI(...)` 参数时别漏掉它。
 
 ## 已知局限
 
@@ -546,3 +551,15 @@ cat /opt/gateway/gateway.db.lock   # 输出当前网关的 PID
 每分钟请求数、鉴权失败次数都存在 SQLite 的 `rate_events` 表里，**网关重启不会清零**。这一点很重要：如果状态在内存里，攻击者只要想办法让网关重启一次（比如打满内存），限流窗口就被重置了。
 
 `rate_events` 会随请求自动清理（每小时一次全局清扫），也可以用 `python cli.py cleanup` 手动清。
+
+### 排错：403 有两种完全不同的含义
+
+公网访问返回 403 时，**先看 body**，两种原因的处置方式完全不同：
+
+| body | 来源 | 含义 | 怎么办 |
+|---|---|---|---|
+| `{"error":{"message":"API Key 已被吊销。","code":"key_revoked"}}` | **网关** | Key 已被 `cli.py revoke` 吊销 | 重新签发。注意网关对**已吊销**的 Key 回的是 403 而不是 401 |
+| `error code: 1010` | **Cloudflare** | 被 Browser Integrity Check 按 User-Agent 拦了 | 见《Cloudflare-Tunnel-创建与域名绑定.md》。`httpx` / `openai` / `requests` 等 SDK 不受影响，只有裸 `urllib` 会被拦 |
+
+401 和 403 的分工：**401 = 没带 Key 或 Key 不认识**（`auth_missing` / `auth_invalid`）；
+**403 = Key 认识但已被吊销**。区分这两者，排查时能少绕一大圈。
