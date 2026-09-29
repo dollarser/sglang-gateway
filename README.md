@@ -32,9 +32,36 @@ SGLang 127.0.0.1:30007  (只监听回环)
 
 网关对客户端完全透明，支持 SSE 流式输出。
 
+### 代码分层
+
+四个模块，依赖方向单向、无环：
+
+```
+app.py           通用网关：鉴权、限流、配额、并发、审计、转发
+ ├─ openai_proto.py   OpenAI 线格式的共享事实（字段名、usage 结构、错误信封）
+ ├─ sglang_compat.py  本服务栈特有的兼容：角色折叠、参数别名、溢出重试、max_model_len
+ └─ store.py          SQLite 存储
+cli.py           Key 管理 CLI
+ └─ store.py
+```
+
+`openai_proto.py` 存在的理由是：有些常量**两层都要用，放谁那儿都是错的依赖方向**。
+放 `app.py` 会让 `sglang_compat` 反向 import 造成循环依赖；放 `sglang_compat` 会让
+通用层反向依赖专用层——将来上游修好、想删掉兼容层时会连带把通用逻辑弄挂。
+
+判断一段代码该放哪一层，只问一句：**换一个模型服务，它还需要吗？**
+需要 → `app.py`；不需要 → `sglang_compat.py`。
+
+`openai_proto.py` 与 `sglang_compat.py` 都是**零第三方依赖的纯函数模块**，
+所以能跑纯标准库的单元测试（`test_openai_proto.py`、`test_sglang_compat.py`，共 40 项）：
+
+```bash
+python3 -m unittest discover -p "test_*.py"
+```
+
 ### 关于「兼容改写」
 
-Qwen3.8-27B 的 SGLang 服务有三处与 OpenAI 客户端不完全兼容，网关在转发前会就地修掉（见 `compat.py`）：
+Qwen3.8-27B 的 SGLang 服务有四类与 OpenAI 客户端不完全兼容，网关在转发前会就地修掉（见 `sglang_compat.py`）：
 
 | 情况 | 裸 SGLang 的表现 | 网关的处理 |
 |---|---|---|
@@ -42,6 +69,7 @@ Qwen3.8-27B 的 SGLang 服务有三处与 OpenAI 客户端不完全兼容，网�
 | 输入 + `max_tokens` 超过模型窗口 | `400 Requested token count exceeds ...` | 从错误文案反算可用预算，降 `max_tokens` 重试一次 |
 | `reasoning_effort=high` | Qwen 侧认的是 `xhigh` | 别名映射 |
 | `output_config.effort`（Anthropic 风格） | 上游不认识 | 摘掉该键 |
+| `/v1/models` 的 `max_model_len` | 非 OpenAI 规范字段 | 兼容层负责解析，网关据此钳制输出上限 |
 
 这段逻辑原本由一个独立的小代理进程承担（`30008 -> 30007`），2026-09-29 内化进网关，
 链路由四跳减为三跳，少一个进程、少一次转发、少一个能被直接打到的无鉴权端口。
@@ -80,7 +108,7 @@ uvicorn app:app --host 127.0.0.1 --port 2233
 兼容层的单元测试（纯标准库，不需要 SGLang）：
 
 ```bash
-python3 test_compat.py        # 23 项，覆盖角色折叠、参数别名、上下文预算反算
+python3 -m unittest discover -p "test_*.py"   # 40 项，不需要 SGLang
 ```
 
 ## 环境变量

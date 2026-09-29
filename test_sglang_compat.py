@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""compat.py 的单元测试。
+"""sglang_compat.py 的单元测试。
 
-纯标准库，不依赖网络、不依赖 SGLang，任何机器上都能跑：
+纯标准库，不依赖网络、不依赖 SGLang、不依赖 FastAPI，任何机器上都能跑：
 
-    python3 -m unittest test_compat -v
-    或直接  python3 test_compat.py
+    python3 -m unittest test_sglang_compat -v
+    或直接  python3 test_sglang_compat.py
+
+这个模块能做到「零依赖单测」，正是因为它只放纯函数、不碰网络与全局状态。
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import json
 import unittest
 
-import compat
+import sglang_compat as compat
 
 CONTEXT_ERROR = (
     b'{"message":"Requested token count exceeds the model\'s maximum context length of '
@@ -113,6 +115,38 @@ class TestPurity(unittest.TestCase):
         self.assertEqual(compat.rewrite_payload(src), src)
 
 
+class TestParseModelMaxLen(unittest.TestCase):
+    """`max_model_len` 不是 OpenAI 规范字段，解析规则属于这一层。"""
+
+    def test_picks_the_field(self):
+        payload = {"data": [{"id": "Qwen3.8-27B", "max_model_len": 262144}]}
+        self.assertEqual(compat.parse_model_max_len(payload), 262144)
+
+    def test_takes_minimum_across_models(self):
+        payload = {"data": [
+            {"id": "a", "max_model_len": 262144},
+            {"id": "b", "max_model_len": 32768},
+        ]}
+        self.assertEqual(compat.parse_model_max_len(payload), 32768)
+
+    def test_zero_means_no_clamping(self):
+        """取不到时返回 0，调用方据此退化为「不钳制」，不是错误。"""
+        self.assertEqual(compat.parse_model_max_len({}), 0)
+        self.assertEqual(compat.parse_model_max_len({"data": []}), 0)
+        self.assertEqual(compat.parse_model_max_len({"data": [{"id": "a"}]}), 0)
+        self.assertEqual(compat.parse_model_max_len(None), 0)
+        self.assertEqual(compat.parse_model_max_len("nope"), 0)
+
+    def test_ignores_bogus_entries(self):
+        payload = {"data": [
+            {"max_model_len": "not-a-number"},
+            {"max_model_len": -5},
+            "a string",
+            {"max_model_len": 4096},
+        ]}
+        self.assertEqual(compat.parse_model_max_len(payload), 4096)
+
+
 class TestContextRetryBudget(unittest.TestCase):
     def test_budget_math(self):
         got = compat.context_retry_budget(CONTEXT_ERROR, {"max_tokens": 262144})
@@ -147,6 +181,33 @@ class TestContextRetryBudget(unittest.TestCase):
 
     def test_non_dict_payload(self):
         self.assertIsNone(compat.context_retry_budget(CONTEXT_ERROR, None))
+
+
+class TestPlanContextRetry(unittest.TestCase):
+    """`plan_context_retry` 是给调用方用的门面：拿到新 payload 直接重发即可。"""
+
+    def test_returns_new_payload_and_note(self):
+        payload = {"model": "m", "max_tokens": 262144}
+        plan = compat.plan_context_retry(CONTEXT_ERROR, payload)
+        self.assertIsNotNone(plan)
+        new_payload, note = plan
+        self.assertEqual(new_payload["max_tokens"], 262144 - 9062 - compat.CONTEXT_RETRY_SAFETY_TOKENS)
+        self.assertIn("max_tokens", note)
+
+    def test_other_fields_preserved(self):
+        payload = {"model": "m", "messages": [{"role": "user", "content": "U"}], "max_tokens": 262144}
+        new_payload, _ = compat.plan_context_retry(CONTEXT_ERROR, payload)
+        self.assertEqual(new_payload["model"], "m")
+        self.assertEqual(new_payload["messages"], payload["messages"])
+
+    def test_does_not_mutate_input(self):
+        """调用方还持有原 payload（比如要拿 model 字段记账），不能被动过。"""
+        payload = {"model": "m", "max_tokens": 262144}
+        compat.plan_context_retry(CONTEXT_ERROR, payload)
+        self.assertEqual(payload["max_tokens"], 262144)
+
+    def test_none_when_not_retryable(self):
+        self.assertIsNone(compat.plan_context_retry(b'{"message":"nope"}', {"max_tokens": 10}))
 
 
 if __name__ == "__main__":

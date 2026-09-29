@@ -1,12 +1,17 @@
-"""Qwen3.8-27B / SGLang 兼容层。
+"""SGLang + Qwen 服务栈的兼容层。
 
-这个模块原本是一个独立的小代理（`30008 -> 30007`）。后来发现它做的事
-本质上是「请求翻译」，而不是「网络转发」——把它内化进网关之后，链路从
-四跳减为三跳：
+**职责边界**：这里只放「这个服务栈特有的东西」——SGLang 不认的角色名、
+Qwen 认识的参数别名、SGLang 的报错文案格式、`max_model_len` 这个非标准字段。
+通用网关该管的事（鉴权、限流、配额、并发、审计、转发）一律在 `app.py`。
+
+判断一段代码该不该放这里，只问一句：**换一个模型服务，它还需要吗？**
+需要 → 放 `app.py`；不需要 → 放这里。
+
+这个模块原本是一个独立的小代理进程（`30008 -> 30007`）。内化之后链路从四跳减为三跳：
 
     客户端 -> Cloudflare Tunnel -> 网关(2233) -> SGLang(30007)
 
-它解决三类上游不兼容：
+它解决四类上游不兼容：
 
   1. `developer` 角色
      OpenAI 新规范里的 `developer` 角色，SGLang 会直接拒绝：
@@ -23,7 +28,11 @@
      `reasoning_effort` 的 `high` 在 Qwen 侧对应 `xhigh`；
      Anthropic 风格的 `output_config.effort` 不被识别，需要摘掉。
 
-所有函数都是纯函数，不碰网络、不碰全局状态，方便单独测试。
+  4. 非标准的 `max_model_len`
+     `/v1/models` 里的这个字段不是 OpenAI 规范的一部分，是 vLLM/SGLang 系加的。
+
+**所有函数都是纯函数**：不碰网络、不碰全局状态、不改动入参，
+所以可以零依赖单测（见 `test_sglang_compat.py`）。
 """
 
 from __future__ import annotations
@@ -34,7 +43,9 @@ import os
 import re
 from typing import Any, Optional
 
-logger = logging.getLogger("gateway.compat")
+from openai_proto import MAX_TOKENS_FIELDS
+
+logger = logging.getLogger("gateway.sglang_compat")
 
 # `reasoning_effort` 的取值别名。键是客户端可能发来的，值是上游认识的。
 REASONING_EFFORT_ALIASES = {"high": "xhigh"}
@@ -44,8 +55,19 @@ REASONING_EFFORT_ALIASES = {"high": "xhigh"}
 # 有几十个 token 的出入；贴着上限重试容易二次溢出，留 512 个 token 兜底。
 CONTEXT_RETRY_SAFETY_TOKENS = int(os.getenv("CONTEXT_RETRY_SAFETY_TOKENS", "512"))
 
-# 输出预算字段。`max_completion_tokens` 是 OpenAI 的新名字，优先级更高。
-MAX_TOKENS_FIELDS = ("max_completion_tokens", "max_tokens")
+# SGLang 用这个状态码表达「上下文溢出」。各家基本都用 400，不是 SGLang 特有，
+# 但集中在这里便于将来换成解析 error.type 时一并调整。
+CONTEXT_OVERFLOW_STATUS = 400
+
+# 「输入 + 输出 超过窗口」的报错文案。上游措辞一旦变化，只需要改这里。
+_CONTEXT_OVERFLOW_RE = re.compile(
+    r"maximum context length of (\d+) tokens.*?"
+    r"(\d+) tokens from the input messages and (\d+) tokens for the completion",
+    flags=re.DOTALL,
+)
+
+
+# ---------------- 消息规范化 ----------------
 
 
 def _content_as_text(content: Any) -> str:
@@ -178,6 +200,34 @@ def rewrite_payload(payload: Any) -> Any:
     return out
 
 
+# ---------------- 模型元信息 ----------------
+
+
+def parse_model_max_len(models_payload: Any) -> int:
+    """从 `/v1/models` 的响应里取出模型的上下文窗口。
+
+    `max_model_len` **不是 OpenAI 规范字段**（OpenAI 的 `/v1/models` 只返回
+    `id` / `object` / `created` / `owned_by`），是 vLLM / SGLang 系自己加的，
+    所以这条解析规则属于兼容层，不属于通用网关。
+
+    多个模型时取最小值——网关只能按最保守的窗口做钳制。
+    取不到返回 0，表示「不做窗口钳制」（调用方据此退化，不视为错误）。
+    """
+    if not isinstance(models_payload, dict):
+        return 0
+    lens: list[int] = []
+    for model in models_payload.get("data") or []:
+        if not isinstance(model, dict):
+            continue
+        value = model.get("max_model_len")
+        if isinstance(value, (int, float)) and value > 0:
+            lens.append(int(value))
+    return min(lens) if lens else 0
+
+
+# ---------------- 上下文溢出重试 ----------------
+
+
 def context_retry_budget(error_body: bytes, payload: Any) -> Optional[tuple[str, int]]:
     """从「上下文溢出」的 400 错误里算出可用的输出预算。
 
@@ -195,17 +245,8 @@ def context_retry_budget(error_body: bytes, payload: Any) -> Optional[tuple[str,
     if not isinstance(payload, dict) or not error_body:
         return None
 
-    try:
-        message = error_body.decode("utf-8", "replace")
-    except Exception:  # pragma: no cover - decode 带 replace 不会抛
-        return None
-
-    match = re.search(
-        r"maximum context length of (\d+) tokens.*?"
-        r"(\d+) tokens from the input messages and (\d+) tokens for the completion",
-        message,
-        flags=re.DOTALL,
-    )
+    message = error_body.decode("utf-8", "replace")
+    match = _CONTEXT_OVERFLOW_RE.search(message)
     if not match:
         return None
 
@@ -228,3 +269,19 @@ def context_retry_budget(error_body: bytes, payload: Any) -> Optional[tuple[str,
             return field, available
 
     return None
+
+
+def plan_context_retry(error_body: bytes, payload: Any) -> Optional[tuple[dict, str]]:
+    """给调用方用的「重试计划」：返回 `(新 payload, 日志说明)`，不需要重试则 None。
+
+    调用方只管「拿到新 payload 就原样重发一次」，不需要知道是哪个字段、
+    降到了多少、怎么算的——那些都是这个服务栈的内部细节。
+
+    入参 payload 不会被改动，返回的是新 dict。
+    """
+    budget = context_retry_budget(error_body, payload)
+    if budget is None:
+        return None
+    field, reduced = budget
+    note = f"{field} {payload[field]} -> {reduced}"
+    return {**payload, field: reduced}, note

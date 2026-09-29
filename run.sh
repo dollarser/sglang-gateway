@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 # ---------------- 配置区：按你的实际情况改这里 ----------------
 
 # SGLang 服务地址。**直连裸 SGLang**，不要填兼容代理的端口——
-# 兼容改写（developer 角色、上下文溢出重试）已内化到 compat.py，多一跳没有意义。
+# 兼容改写（developer 角色、上下文溢出重试）已内化到 sglang_compat.py，多一跳没有意义。
 export SGLANG_BASE_URL="${SGLANG_BASE_URL:-http://127.0.0.1:30007}"
 
 # SGLang 若启用了 --api-key，在这里填；没启用就留空
